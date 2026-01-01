@@ -4,7 +4,7 @@ import { getFirestore, doc, setDoc, getDoc, collection, updateDoc, deleteDoc, on
 import { getDatabase, ref, set, get, onValue, update, remove } from "firebase/database";
 import { getAuth, onAuthStateChanged } from "firebase/auth";
 
-// --- FIREBASE CONFIGURATION (PROVIDED BY USER) ---
+// --- FIREBASE CONFIGURATION ---
 const firebaseConfig = {
   apiKey: "AIzaSyC7N3IOa7GRETNRBo8P-QKVFzg2bLqoEco",
   authDomain: "students-app-deae5.firebaseapp.com",
@@ -28,7 +28,7 @@ export const checkFirebaseConnection = () => {
   return true; 
 };
 
-export const subscribeToAuth = (callback: (user: any) => void) => {
+export const subscribeToAuth = (callback) => {
   return onAuthStateChanged(auth, (user) => {
     callback(user);
   });
@@ -37,52 +37,50 @@ export const subscribeToAuth = (callback: (user: any) => void) => {
 // --- DUAL WRITE / SMART READ LOGIC ---
 
 // 1. User Data Sync
-export const saveUserToLive = async (user: any) => {
+export const saveUserToLive = async (user) => {
   try {
-    if (!user || !user.id) return;
+    if (!user || !user.id) {
+        console.error("SaveUserToLive Error: Missing User ID", user);
+        return;
+    }
     
-    // 1. RTDB
+    // 1. RTDB (Fastest & Primary for Dashboard)
     const userRef = ref(rtdb, `users/${user.id}`);
     await set(userRef, user);
     
-    // 2. Firestore (Dual Write)
+    // 2. Firestore (Dual Write for Backup/Queries)
     await setDoc(doc(db, "users", user.id), user);
+    
+    console.log("User saved successfully to both DBs");
   } catch (error) {
     console.error("Error saving user:", error);
   }
 };
 
-export const subscribeToUsers = (callback: (users: any[]) => void) => {
-  // Prefer Firestore for Admin List (More Reliable)
-  const q = collection(db, "users");
-  return onSnapshot(q, (snapshot) => {
-      const users = snapshot.docs.map(doc => doc.data());
-      if (users.length > 0) {
-          callback(users);
-      } else {
-          // Fallback to RTDB if Firestore is empty (migration scenario)
-          const usersRef = ref(rtdb, 'users');
-          onValue(usersRef, (snap) => {
-             const data = snap.val();
-             const userList = data ? Object.values(data) : [];
-             callback(userList);
-          }, { onlyOnce: true });
-      }
+// ** UPDATED FUNCTION: Now listens to RTDB directly **
+export const subscribeToUsers = (callback) => {
+  const usersRef = ref(rtdb, 'users');
+  
+  // onValue Realtime Database को सुनता है (Admin Dashboard के लिए सबसे तेज़)
+  return onValue(usersRef, (snapshot) => {
+      const data = snapshot.val();
+      
+      // Data को Object से Array में convert करें: [{name:..}, {name:..}]
+      const userList = data ? Object.values(data) : [];
+      
+      callback(userList);
   }, (error) => {
-      console.error("Firestore Subscription Error:", error);
-      if (error.code === 'permission-denied') {
-          alert("⚠️ Admin Access Error: Permission Denied.\n\nThe server rejected your request. This usually happens if your Admin Account isn't synced.\n\nTry Logging Out and Logging In again to fix permissions.");
-      }
+      console.error("RTDB Subscription Error:", error);
   });
 };
 
-export const getUserData = async (userId: string) => {
+export const getUserData = async (userId) => {
     try {
-        // Try RTDB
+        // Try RTDB First (Faster)
         const snap = await get(ref(rtdb, `users/${userId}`));
         if (snap.exists()) return snap.val();
         
-        // Try Firestore
+        // Try Firestore (Fallback)
         const docSnap = await getDoc(doc(db, "users", userId));
         if (docSnap.exists()) return docSnap.data();
 
@@ -90,7 +88,7 @@ export const getUserData = async (userId: string) => {
     } catch (e) { console.error(e); return null; }
 };
 
-export const getUserByEmail = async (email: string) => {
+export const getUserByEmail = async (email) => {
     try {
         const q = query(collection(db, "users"), where("email", "==", email));
         const querySnapshot = await getDocs(q);
@@ -102,7 +100,7 @@ export const getUserByEmail = async (email: string) => {
 };
 
 // 2. System Settings Sync
-export const saveSystemSettings = async (settings: any) => {
+export const saveSystemSettings = async (settings) => {
   try {
     await set(ref(rtdb, 'system_settings'), settings);
     await setDoc(doc(db, "config", "system_settings"), settings);
@@ -111,29 +109,27 @@ export const saveSystemSettings = async (settings: any) => {
   }
 };
 
-export const subscribeToSettings = (callback: (settings: any) => void) => {
-  // Listen to Firestore
-  return onSnapshot(doc(db, "config", "system_settings"), (docSnap) => {
-      if (docSnap.exists()) {
-          callback(docSnap.data());
-      } else {
-          // Fallback RTDB
-           onValue(ref(rtdb, 'system_settings'), (snap) => {
-               const data = snap.val();
-               if (data) callback(data);
-           }, { onlyOnce: true });
-      }
+export const subscribeToSettings = (callback) => {
+  // Prefer RTDB for Settings too (Faster config load)
+  const settingsRef = ref(rtdb, 'system_settings');
+  return onValue(settingsRef, (snapshot) => {
+       const data = snapshot.val();
+       if (data) callback(data);
+  }, (error) => {
+      // Fallback to Firestore if RTDB fails
+      getDoc(doc(db, "config", "system_settings")).then(docSnap => {
+        if (docSnap.exists()) callback(docSnap.data());
+      });
   });
 };
 
 // 3. Content Links Sync (Bulk Uploads)
-export const bulkSaveLinks = async (updates: Record<string, any>) => {
+export const bulkSaveLinks = async (updates) => {
   try {
     // RTDB
     await update(ref(rtdb, 'content_links'), updates);
     
     // Firestore - We save each update as a document in 'content_data' collection
-    // 'updates' is a map of key -> data
     const batchPromises = Object.entries(updates).map(async ([key, data]) => {
          await setDoc(doc(db, "content_data", key), data);
     });
@@ -145,7 +141,7 @@ export const bulkSaveLinks = async (updates: Record<string, any>) => {
 };
 
 // 4. Chapter Data Sync (Individual)
-export const saveChapterData = async (key: string, data: any) => {
+export const saveChapterData = async (key, data) => {
   try {
     await set(ref(rtdb, `content_data/${key}`), data);
     await setDoc(doc(db, "content_data", key), data);
@@ -154,7 +150,7 @@ export const saveChapterData = async (key: string, data: any) => {
   }
 };
 
-export const getChapterData = async (key: string) => {
+export const getChapterData = async (key) => {
     try {
         // 1. Try RTDB (Faster)
         const snapshot = await get(ref(rtdb, `content_data/${key}`));
@@ -176,34 +172,29 @@ export const getChapterData = async (key: string) => {
 };
 
 // Used by client to listen for realtime changes to a specific chapter
-export const subscribeToChapterData = (key: string, callback: (data: any) => void) => {
+export const subscribeToChapterData = (key, callback) => {
     const rtdbRef = ref(rtdb, `content_data/${key}`);
     return onValue(rtdbRef, (snapshot) => {
         if (snapshot.exists()) {
             callback(snapshot.val());
-        } else {
-            // If not in RTDB, check Firestore (one-time fetch or snapshot?)
-            // For now, let's just do one-time fetch to avoid complexity of double listeners
-            getDoc(doc(db, "content_data", key)).then(docSnap => {
-                if (docSnap.exists()) callback(docSnap.data());
-            });
         }
     });
 };
 
 
-export const saveTestResult = async (userId: string, attempt: any) => {
+export const saveTestResult = async (userId, attempt) => {
     try {
         const docId = `${attempt.testId}_${Date.now()}`;
         await setDoc(doc(db, "users", userId, "test_results", docId), attempt);
     } catch(e) { console.error(e); }
 };
 
-export const updateUserStatus = async (userId: string, time: number) => {
+export const updateUserStatus = async (userId, time) => {
      try {
         const userRef = ref(rtdb, `users/${userId}`);
         await update(userRef, { lastActiveTime: new Date().toISOString() });
     } catch (error) {
+        console.error("Status update error", error);
     }
 };
 
